@@ -1,0 +1,156 @@
+---
+title: "Analyse Spatiale VIH"
+author: "Astri Ugo"
+date: "2025-11-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Analyse Spatiale du VIH en France des 20-29 ans
+
+chargement des données et des librairies
+
+```{r}
+
+library(readxl)
+chomage <- read_excel("data/chomage.xlsx")
+densité <- read_excel("data/densité.xlsx")
+bdd_santé_génrérales <- read_excel("data/bdd santé génrérales.xlsx")
+BDD_Délinquance_de_2016_2025_par_depart <- read_delim("data/BDD Délinquance de 2016 - 2025 par depart.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+Revenu_Annuel_moyen_en_France_2019 <- read_csv("data/Revenu Annuel moyen en France 2019.csv")
+
+VIH_20_24 <- read.csv("data/VIH 20-24.csv", sep = ";")
+VIH_25_29 <- read.csv("data/VIH 25-29.csv", sep = ";")
+
+```
+
+**creation du tableau de données**
+
+```{r}
+
+#Ntop effectifs des patients pris en charge pour la pathologie 
+#Npop population de reference qui est celle de la cartographie des pathologies
+#prev prevalence des patients pris en charge pour la pathologie 
+
+library(dplyr)
+
+# Sélection des variables pertinentes dans chaque base
+VIH_20_24_sel <- VIH_20_24 %>%
+  select(dept, Ntop, Npop, prev)
+
+VIH_25_29_sel <- VIH_25_29 %>%
+  select(dept, Ntop, Npop, prev)
+
+# Fusion des deux tranches d'âge en un seul dataframe
+VIH_20_29 <- bind_rows(VIH_20_24_sel, VIH_25_29_sel) %>%
+  group_by(dept) %>%
+  summarise(
+    Ntop = sum(Ntop, na.rm = TRUE),     # total patients pris en charge
+    Npop = sum(Npop, na.rm = TRUE),     # population totale
+    prev = (Ntop / Npop) * 100          # calcul de la prévalence globale
+  )
+
+```
+
+```{r}
+library(stringr)
+
+library(dplyr)
+library(stringr)
+
+Deliquance_clean <- BDD_Délinquance_de_2016_2025_par_depart %>%
+  select(
+    dept = Code_departement,
+    taux_pour_mille,
+    indicateur,
+    nombre
+  ) %>%
+  # nettoyer les colonnes texte
+  mutate(
+    dept = str_trim(as.character(dept)),
+    dept = ifelse(tolower(dept) %in% c("n/a", "na", "nd", "nc", "-", "non disponible"), NA, dept),
+    taux_pour_mille = str_extract(taux_pour_mille, "[0-9]+\\.?[0-9]*"),
+    nombre = str_extract(nombre, "[0-9]+\\.?[0-9]*"),
+    taux_pour_mille = as.numeric(taux_pour_mille),
+    nombre = as.numeric(nombre)
+  ) %>%
+  filter(!is.na(dept)) %>%  # supprimer lignes sans département
+  group_by(dept) %>%
+  summarise(
+    nb_actes_delinquance = sum(nombre, na.rm = TRUE),
+    taux_delinquance_pour_mille = mean(taux_pour_mille, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+
+
+Chomage_clean <- chomage %>%
+  slice(-c(1:3, 99:105)) %>%  # commence à la 4e ligne et ignore les lignes de fin inutiles
+  select(
+    dept = `Taux de chômage localisés au 2ᵉ trimestre 2025 : comparaisons départementales`,
+    tx_chomage = ...3
+  ) %>%
+  # nettoyer la colonne dept
+  mutate(
+    dept = str_trim(dept),
+    dept = ifelse(tolower(dept) %in% c("n/a", "na", "nd", "nc", "-", "non disponible"), NA, dept),
+    # extraire uniquement le chiffre de tx_chomage
+    tx_chomage = str_extract(tx_chomage, "[0-9]+\\.?[0-9]*"),
+    tx_chomage = as.numeric(tx_chomage)
+  ) %>%
+  filter(!is.na(dept), !is.na(tx_chomage))  # supprimer lignes avec NA
+
+revenu <- Revenu_Annuel_moyen_en_France_2019 |>
+  select( Code_Dep, `Revenu annuel Moyen (en millier d’euros)`)
+
+densite_clean <- densité %>%
+  slice(-c(1:3)) %>%  # commence à la 4e ligne
+    select(
+    dept = `Observatoire des territoires - ANCT`,
+    densite_pop = ...3
+  ) %>%
+  filter(
+    !is.na(dept),  # enlever lignes sans département
+    !densite_pop %in% c("N/A - résultat non disponible")  # enlever valeurs manquantes codées
+  )
+
+pauvrete_clean <- bdd_santé_génrérales %>%
+  slice(-c(1:3)) %>%  # commence à la 4e ligne
+  select(
+    dept = `Insee - Statistiques locales`,
+    tx_pauvrete = ...6
+  ) %>%
+  filter(
+    !is.na(dept),                          # enlever lignes sans département
+    !tx_pauvrete %in% c("N/A - résultat non disponible")  # enlever les valeurs manquantes codées
+  )
+
+```
+
+```{r}
+Base_finale <- VIH_20_29 %>%
+  left_join(Deliquance_clean, by = "dept") %>%
+  left_join(Chomage_clean, by = "dept") %>%
+  left_join(revenu %>% rename(dept = Code_Dep), by = "dept") %>%
+  left_join(densite_clean, by = "dept") %>%
+  left_join(pauvrete_clean, by = "dept") %>%
+  # garder uniquement les départements valides
+  filter(!is.na(dept))
+
+# Vérification
+glimpse(Base_finale)
+summary(Base_finale)
+```
+
+```{r}
+# chemin où tu veux sauvegarder le fichier
+# tu peux mettre ton propre chemin, ici je mets le dossier courant
+write.csv(Base_finale, "repartition_VIH_20_29_par_dept.csv", 
+          row.names = FALSE,  # pas de colonne d'index
+          fileEncoding = "UTF-8")  # pour garder les accents si besoin
+getwd()
+```
