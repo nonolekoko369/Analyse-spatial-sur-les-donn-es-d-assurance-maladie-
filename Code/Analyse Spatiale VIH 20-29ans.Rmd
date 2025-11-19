@@ -1,0 +1,830 @@
+---
+title: "Analyse Spatiale du VIH en France des 20-29 ans"
+author: "Astri Ugo"
+date: "2025-11-05"
+output: html_document
+---
+
+Téléchargement des packages
+
+```{r setup, include=FALSE}
+pacman::p_load(dplyr,stargazer,RColorBrewer,ggridges,tidyr,spatialreg, ggplot2,spdep, sf,readr,readxl,lmtest,tmap,stringr,viridis, vtable, knitr)
+```
+
+
+# 1 Lecture des données et préparation des 
+
+## 1.1 Source et description des données
+
+Source :
+
+
+Intitulé des séries :
+
+
+
+
+
+
+
+## 1.2 Statistiques descriptives
+
+```{r}
+donnees=read.csv("repartition_VIH_20_29_par_dept.csv",sep=",",dec=".",header=TRUE, colClasses=c('character','character',rep('numeric',7)))
+options(digits = 3)
+
+kable(donnees[1:20,], caption ="Données VIH sources data.gouv")
+```
+
+
+```{r}
+st(donnees[,-c(1,2)])
+```
+
+
+# 2 Représentation cartographique des données
+## 2.1 Téléchargement du fond de carte
+
+Sources
+https://data-interne.ademe.fr/datasets/geo-contours-departements
+https://www.insee.fr/fr/information/4652957
+https://www.observatoire-des-territoires.gouv.fr/kiosque/panorama-des-zones-demploi
+```{r}
+map <-st_read(dsn="DEPARTEMENT1.shp",layer= "DEPARTEMENT1") 
+```
+
+
+```{r}
+map <-map %>% st_set_crs(2154)
+## Change to WGS 84
+map <-st_make_valid(map)
+dim(map)
+```
+## 2.2 Représentation du fond de carte avec plot ou tm_shape (package tmap)
+```{r}
+plot(st_geometry(map))
+```
+```{r}
+tm_shape(map) +tm_borders()
+```
+## 2.3 Représentation des données sur la carte
+
+Il faut fusionner les données des 2 fichiers. Pour cela il faut un identifiant commun. Dans le fichier donnees_ze il s’agit de ze2010 et dans map_ze de Codgeo.
+
+```{r}
+for (i in 1:nrow(donnees)) {
+  if (str_length(donnees$dept[i]) == 1) {
+    donnees$dept[i] <- str_c("0", donnees$dept[i], sep = "")
+  }
+}
+
+donnees$dept
+```
+```{r}
+map$DDEP_C_COD
+```
+```{r}
+tm_shape(map) +tm_borders()+tm_graticules(lines=FALSE)
+```
+
+```{r}
+colnames(donnees)[1]<-"DDEP_C_COD"
+
+map <- left_join(map, donnees, by = "DDEP_C_COD")
+
+ggplot(data = map) +
+  geom_sf(aes(fill = tx_chomage)) +scale_fill_viridis_c(option="rocket",begin = 1,end=0)+
+  xlab("Longitude") + ylab("Latitude")+ggtitle("Taux de chômage en France")
+```
+```{r}
+map$Ntop <- as.numeric(map$Ntop)
+ggplot(data = map) +
+  geom_sf(aes(fill = Ntop)) +scale_fill_viridis_c(option="rocket",begin = 1,end=0)+
+  xlab("Longitude") + ylab("Latitude")+ggtitle("Nombre de VIH en France")
+```
+3 Matrices de poids spatiales
+
+Nous allons construire différentes formes de matrices de poids spatiales.
+3.1 Matrice de contiguité
+
+Représentation des centroïdes pour chaque zone géographique
+
+```{r}
+tmap_mode("plot")
+
+cent <- st_centroid(st_geometry(map))
+
+tm_shape(map) +
+  tm_polygons(col = "white", border.col = "grey25") +
+  tm_graticules(lines = FALSE) +
+  tm_shape(cent) +
+  tm_dots(size = 0.2, fill = "red") +
+  tm_layout(title = "Centroids")
+```
+
+```{r}
+coor<-st_centroid(st_geometry(map))
+mapC.nb<-poly2nb(map,queen = TRUE)
+summary(mapC.nb)
+```
+```{r}
+head(mapC.nb)
+```
+Représentation des liens sur une carte
+
+```{r}
+tmap_mode("plot")
+
+cent <- st_centroid(st_geometry(map))
+voisins <- nb2lines(mapC.nb, coords = coor)
+
+tm_shape(map) +
+  tm_polygons(col = "white", border.col = "grey25") +
+  tm_graticules(lines = FALSE) +
+  tm_shape(cent) +
+  tm_dots(size = 0.4, fill = "red", col = "red") +
+  tm_shape(voisins) + 
+  tm_lines(col = "black", lwd = 0.3) +
+  tm_layout(title = "Voisins contigus (Queen)")
+```
+Avec la fonction nb2listw on crée la matrice de contiguité normalisée par ligne par défault
+
+```{r}
+cont.w<-nb2listw(mapC.nb,style="W")
+summary(cont.w)
+```
+3.2 Matrice des plus proches voisins
+
+La fonction knearneigh permet de déterminer les plus proches voisins de chaque zone et la fonction knn2b convertit un objet knn (créé par knearneigh) en une liste de voisins de classe nb avec une liste de vecteurs entiers contenant les numéros des régions voisines.
+
+```{r}
+mapPPV2.knn<-knearneigh(coor,k=2) 
+head(mapPPV2.knn$nn)
+```
+```{r}
+mapPPV2.nb<- knn2nb(mapPPV2.knn)
+```
+Représentation des liens
+
+```{r}
+tmap_mode("plot")
+
+cent <- st_centroid(st_geometry(map))
+voisins2 <- nb2lines(mapPPV2.nb, coords=coor)
+
+tm_shape(map) +
+  tm_polygons(col = "white", border.col = "grey25") +
+  tm_graticules(lines = FALSE) +
+  tm_shape(cent) +
+  tm_dots(size = 0.4, fill = "red", col = "red") +
+  tm_shape(voisins2) +
+  tm_lines(col="black", lwd=0.3) +
+  tm_layout(title ="2 plus proches voisins")
+```
+Création de la matrice poids normalisée des 2 plus proches voisins avec la fonction 
+```{r}
+PPV2.w<-nb2listw(mapPPV2.nb,style="W")
+```
+
+3.3 Matrice de poids basée sur la distance euclienne
+
+La fonction nbdists montre la distance maximale par rapport aux voisins les plus proches. 
+
+```{r}
+nb1 <- knn2nb(knearneigh(coor, k = 1))
+#nb1 <- make.sym.nb(nb1)
+dsts <- unlist(nbdists(nb1, coor))
+summary(dsts)
+```
+Ici la distance moyenne est de 0.65 km
+
+La fonction dnearneigh donne les voisin à moins de 100km
+
+```{r}
+nb100km <- dnearneigh(x = st_centroid(map), d1 = 0, d2 = 100000)
+head(nb100km)
+```
+Représentation des voisins distants de moins de 100km
+
+```{r}
+tmap_mode("plot")
+
+cent <- st_centroid(st_geometry(map))
+voisins100km <- nb2lines(nb100km, coords=coor)
+
+tm_shape(map) +
+  tm_polygons(col = "white", border.col = "grey25") +
+  tm_graticules(lines = FALSE) +
+  tm_shape(cent) +
+  tm_dots(size = 0.4, fill = "red", col = "red") +
+  tm_shape(voisins100km) +
+  tm_lines(col="black", lwd=0.3)+
+  tm_layout(title ="Voisins à moins de 100km")
+```
+
+
+Calcul des distances avec la fonction nbdists, et de la distance inverse avec gamma =1
+```{r}
+dists <- nbdists(nb100km, coor)
+
+ids <- lapply(dists, function(x){1/x})
+nb100km.ids.w <- nb2listw(nb100km, glist = ids, style = "W")
+```
+Calcul des distances et de la distance inverse avec gamma =2
+
+```{r}
+ids2 <- lapply(dists, function(x){1/(x*x)})
+nb100km.ids2.w <- nb2listw(nb100km, glist = ids2, style = "W")
+```
+
+4 Analyse de l’autocorrélation spatiale
+4.1 Création du spatial lag avec la matrice de contiguité normalisée
+
+La fonction attributes vérifie que les ID sont dans “neighbours”” et weights dans “weights”
+
+```{r}
+attributes(cont.w)
+```
+```{r}
+x_prev <- cbind(donnees$prev)
+wx_prev <- lag.listw(cont.w,x_prev) #spatial lag
+```
+Vérification pour ID=1
+
+
+```{r}
+cont.w$neighbours[1] 
+```
+
+```{r}
+cont.w$weights[1] 
+```
+```{r}
+wx_prev[1,] 
+```
+Comparaison de x_chom et wx_chom
+
+```{r}
+par(mfrow=c(1,2),cex.main=0.7)
+boxplot.matrix(x_prev,main="Prévalance VIH x_prev")
+boxplot.matrix(wx_prev,main="Prévalance VIH des voisins wx_prev")
+```
+
+4.2 Indice de Moran calculé avec la matrice de contiguité
+
+L’indice de Moran mesure la corrélation entre X et WX, on peut retrouver cet indice à partir d’une régression simple de WX en fonction de X
+
+```{r}
+lm_moran <- lm(wx_prev~x_prev)
+summary(lm_moran)
+```
+
+```{r}
+ggplot(data = map, mapping = aes(x = x_prev, y = wx_prev )) + geom_point()+labs(title = " Indice de Moran ", y = " Spatial lag wx_prev " , x ="x_prev") + theme(plot.title = element_text(color = "black", size = 8, face = "bold",hjust = 0.5),  axis.title.x = element_text(color = "black", size = 8, hjust = 0.5),
+  axis.title.y = element_text(color = "black", size = 8, hjust = 0.5)) + geom_smooth(method="lm", se=FALSE)
+```
+Application de moran.test avec randomisation= FALSE
+
+  données non centrées
+
+```{r}
+morantest_cho_cont<- moran.test(donnees$prev,cont.w,randomisation=FALSE,alternative="greater")
+morantest_cho_cont
+```
+```{r}
+moran.plot(x=donnees$prev,cont.w,xlab="Prévalence du VIH",ylab="spatial prévalence du VIH",labels=donnees$DDEP_L_LIB)
+```
+.données centrées
+
+```{r}
+donnees$prevc<-donnees$prev-mean(donnees$prev)
+morantest_prev_cont_c<- moran.test(donnees$prevc,cont.w,randomisation=FALSE,alternative="greater")
+morantest_prev_cont_c
+```
+
+```{r}
+moran.plot(x=donnees$prevc,cont.w,xlab="Prévalence du VIH",ylab="spatial prévalence du VIH",labels=donnees$DDEP_L_LIB)
+```
+Application de moran.test avec randomisation = TRUE
+
+```{r}
+morantest_prev_cont_cp<- moran.test(donnees$prevc,cont.w,randomisation=TRUE,alternative="greater")
+morantest_prev_cont_cp
+```
+Application de moran.mc
+```{r}
+morantest_prev_cont_cm <- moran.mc(donnees$prevc,cont.w,99,alternative="greater")
+#Observed value = 0.173645208
+#no permutation give a value greather than 0.56681 L=0
+#p=L+1/K+1 = 1/99+1=0.01
+morantest_prev_cont_cm
+```
+4.3 LISA, les indicateurs locaux d’autocorrélation spatiale
+
+Utilisation de la fonction localmoran
+
+  données non centrées
+
+```{r}
+locm <-localmoran(donnees$prev, cont.w)
+head(locm)
+```
+données centrées
+```{r}
+locmc <-localmoran(donnees$prevc, cont.w)
+head(locmc)
+```
+Egalité du I de moran et de la somme des I locaux pondéré
+```{r}
+all.equal(sum(locmc[,1])/Szero(cont.w), unname(moran.test(donnees$prevc, cont.w)$estimate[1]))
+```
+4.4 Cartographie des indices locaux de Moran sur données centrées
+
+    Sans tenir compte de la significativité
+```{r}
+moran.map <- cbind(map, locmc)
+tm_shape(moran.map) +
+  tm_fill(col = "Ii",
+          style = "quantile",
+          title = "Indice local de Moran sur données centrées") 
+```
+
+
+Avec la significativité
+
+Définition des cadrants, on centre les indices locaux par rapport à leur moyenne et on définit un niveau de significativité (ici = 5%)
+
+```{r}
+x_prevc <- cbind(donnees$prevc)
+wx_prevc <- lag.listw(cont.w,x_prevc) #spatial lag
+
+quadrant <- vector(mode="numeric",length=nrow(locm))
+signif <- 0.05
+
+
+quadrant[x_prevc>0 & wx_prevc>0 & locmc[,5]<signif] <- 4  #High-High
+quadrant[x_prevc <0 & wx_prevc<0  & locmc[,5]<signif] <- 1 #Low-Low
+quadrant[x_prevc<0 & wx_prevc>0  & locmc[,5]<signif] <- 2  #Low_High
+quadrant[x_prevc >0 & wx_prevc<0 & locmc[,5]<signif] <- 3 #High-Low
+quadrant[locmc[,5]>signif] <- 0  #insignificant 
+
+table(quadrant)
+```
+```{r}
+brks <- c(0,1,2,3,4)
+colors <- c("white","blue",rgb(0,0,1,alpha=0.4),rgb(1,0,0,alpha=0.4),"red")
+plot(st_geometry(map),border="lightgray",col=colors[findInterval(quadrant,brks,all.inside=FALSE)])
+box()
+legend("bottomleft", legend = c("insignificant","low-low","low-high","high-low","high-high"),
+       fill=colors,bty="n")
+```
+Test de Moran sur les autres variables
+```{r}
+# Calculer la moyenne sans les NA
+moyenne_chomage <- mean(map$tx_chomage, na.rm = TRUE)
+
+# Remplacer les NA par la moyenne
+map$tx_chomage[is.na(map$tx_chomage)] <- moyenne_chomage
+
+# Vérifier qu'il n'y a plus de NA
+sum(is.na(map$tx_chomage))
+```
+
+```{r}
+morantestCHO<- moran.test(map$tx_chomage,cont.w,randomisation=FALSE,alternative="greater")
+morantestCHO
+```
+
+
+
+```{r}
+morantestcho.MC <- moran.mc(map$tx_chomage, cont.w, 99,alternative="greater")
+morantestcho.MC
+```
+
+```{r}
+morantestDELQ<- moran.test(map$taux_delinquance_pour_mille,cont.w,randomisation=FALSE,alternative="greater")
+morantestDELQ
+```
+
+
+
+```{r}
+morantestDELQ.MC <- moran.mc(map$taux_delinquance_pour_mille, cont.w, 99,alternative="greater")
+morantestDELQ.MC
+```
+
+```{r}
+morantestPAV<- moran.test(map$tx_pauvrete,cont.w,randomisation=FALSE,alternative="greater")
+morantestPAV
+```
+
+```{r}
+morantestPAV.MC <- moran.mc(map$tx_pauvrete, cont.w, 99,alternative="greater")
+morantestPAV.MC
+```
+
+```{r}
+map$Revenu.annuel.Moyen..en.millier.d.euros. <- as.integer(map$Revenu.annuel.Moyen..en.millier.d.euros.)
+morantestRVM.MC <- moran.mc(map$Revenu.annuel.Moyen..en.millier.d.euros., cont.w, 99,alternative="greater")
+morantestRVM.MC
+```
+
+```{r}
+morantestDenP.MC <- moran.mc(map$densite_pop, cont.w, 99,alternative="greater")
+morantestDenP.MC
+```
+
+5 Indice de Geary - test d’autocorrélation spatiale
+
+Utilisation comme pour l’indice de Moran de 2 fonctions : geary.test et geary.mc
+
+Application de geary.test avec randomisation = FALSE
+
+```{r}
+geary.test(map$prev,cont.w, randomisation=FALSE, zero.policy=NULL,
+    alternative="greater")
+```
+Application de geary.test avec randomisation = TRUE
+```{r}
+geary.test(map$prev,cont.w, randomisation=TRUE, zero.policy=NULL,
+    alternative="greater")
+```
+Application de geary.mc
+```{r}
+geary.mc(map$prev,cont.w, nsim=99, zero.policy=NULL, alternative="greater",
+return_boot=FALSE)
+```
+
+```{r}
+geary.mc(map$tx_chomage,cont.w, nsim=99, zero.policy=NULL, alternative="greater",
+return_boot=FALSE)
+```
+
+```{r}
+geary.mc(map$taux_delinquance_pour_mille,cont.w, nsim=99, zero.policy=NULL, alternative="greater",
+return_boot=FALSE)
+```
+
+```{r}
+geary.mc(map$tx_pauvrete,cont.w, nsim=99, zero.policy=NULL, alternative="greater",
+return_boot=FALSE)
+```
+
+```{r}
+geary.mc(map$Revenu.annuel.Moyen..en.millier.d.euros.,cont.w, nsim=99, zero.policy=NULL, alternative="greater",
+return_boot=FALSE)
+```
+
+```{r}
+geary.mc(map$densite_pop ,cont.w, nsim=99, zero.policy=NULL, alternative="greater",
+return_boot=FALSE)
+```
+
+2 Estimation avec les MCO et tests sur les résidus
+
+```{r}
+PREV_OLS = lm(prev~tx_chomage+tx_pauvrete + taux_delinquance_pour_mille + Revenu.annuel.Moyen..en.millier.d.euros.+densite_pop, data=map)
+summary(PREV_OLS)
+```
+2.2 Test d’hétéroscédasticité de white
+```{r}
+bptest(PREV_OLS)
+```
+2.3 Test de Moran d’autocorrélation spatiale
+
+```{r}
+morantest_Res<- moran.test(PREV_OLS$residuals,cont.w,randomisation=FALSE,alternative="two.sided")
+morantest_Res
+```
+Le test de Moran sur les résidus montre une autocorrélation spatiale très significative. Le modèle OLS ne capture pas la dépendance spatiale dans les données. Ce qui viole les hypothèses des MCO.
+
+3.2 Estimation MCO avec la fonction lmSLX
+
+```{r}
+PREV_SLX = lmSLX(prev~ tx_chomage+tx_pauvrete + taux_delinquance_pour_mille + Revenu.annuel.Moyen..en.millier.d.euros. +densite_pop, listw=cont.w,data=map)
+summary(PREV_SLX)
+```
+Calcul des effets marginaux avec la fonction impacts
+
+```{r}
+summary(impacts(PREV_SLX,listw=col.listw), zstats=TRUE)
+```
+3.4 Analyse des résidus
+
+Test d’autocorrélation spatiale sur les résidus
+```{r}
+Moran_Res_SLX=lm.morantest(PREV_SLX,cont.w, alternative="two.sided")
+Moran_Res_SLX
+```
+Représentation cartographique des résidus
+
+```{r}
+map$slx_res<-resid(PREV_SLX)
+tm_shape(map) +tm_text(text = "DDEP_C_COD",size=0.8)+
+  tm_polygons("slx_res", alpha=0.5,palette="-RdYlBu",
+              style="pretty", id="DDEP_C_COD",
+              title="Residus SLX")
+```
+
+
+4 Estimation du modèle SAR
+4.1 Estimateur du maximum de vraissemblance SAR
+
+Il ne faut pas utiliser l’estimateur MCO, l’estimateur est biaisé et non convergent
+
+
+```{r}
+W_PREV <- lag.listw(cont.w,map$prev) 
+PREV_SAR <-lagsarlm(prev~ W_PREV + tx_chomage+tx_pauvrete + taux_delinquance_pour_mille + Revenu.annuel.Moyen..en.millier.d.euros.+densite_pop, listw=cont.w,data=map)
+summary(PREV_SAR)
+```
+4.2 Calcul des effets directs et indirects avec la fonction impacts
+
+```{r}
+summary(impacts(PREV_SAR,listw=cont.w, R=1000), zstats=TRUE)
+```
+4.3 Analyse des résidus MV du modèle SAR
+Représentation cartographique des résidus SAR
+
+```{r}
+map$sar_res <- resid(PREV_SAR)
+
+tm_shape(map) +
+  tm_polygons(
+    fill = "sar_res",
+    fill_alpha = 0.7,
+    fill.scale = tm_scale_intervals(
+      values = "rd_yl_bu",
+      n = 6,
+      style = "pretty"
+    ),
+    fill.legend = tm_legend(title = "Résidus SAR")
+  ) +
+  tm_text(text = "DDEP_C_COD", size = 0.6) +
+  tm_title("Distribution spatiale des résidus SAR")
+```
+
+
+Prédictions avec le modèle SAR
+
+a. Prédiction selon les 3 prédicteurs, Trend Corrected, Trend Signal Noise et BLUP
+
+```{r}
+map$pred_TC <- as.numeric(predict(PREV_SAR,  listw=cont.w, pred.type = "TC"))
+#The Trend Signal Noise Predictor
+map$pred_TS <- as.numeric(predict(PREV_SAR,  listw=cont.w, pred.type = "TS"))
+map$pred_BP <- as.numeric(predict(PREV_SAR,  listw=cont.w, pred.type = "BP"))
+
+summary(map[,c('pred_TC','pred_TS','pred_BP')]%>%st_drop_geometry())
+```
+Comparaison des prédictions
+```{r}
+map %>%
+  ggplot() +
+  geom_boxplot(aes(x = "Trend Corrected", y = pred_TC)) +
+  geom_boxplot(aes(x = "Trend Signal Noise", y = pred_TS)) +
+  geom_boxplot(aes(x = "BLUP", y = pred_BP)) +
+    geom_boxplot(aes(x = "Valeur observée", y = prev))+
+  xlab("Type de prédiction") +
+  ylab("") +
+  ggtitle("Distribution des différentes prédictions du modèle SAR")
+```
+Représentation de la densité des prédictions avec la fonction geom_density
+
+```{r}
+map%>%st_drop_geometry() %>%
+  pivot_longer(cols = c('pred_TC','pred_TS','pred_BP')) %>%
+  ggplot() + 
+    geom_density(mapping = aes(x = value, 
+                          color = name, fill = name), 
+            alpha = 0.3) +
+    scale_color_manual(values=brewer.pal(n = 3, name = "Dark2"))+
+    scale_fill_manual(values=brewer.pal(n = 3, name = "Dark2")) +
+    labs(x = "Prévalence VIH", y = "Densité", 
+       title = "Comparaison des densités des predictions du modèle SAR", 
+       color = "Method", 
+       fill = "Method")
+```
+
+Représentation de la densité des prédictions avec la fonction geom_density_ridges
+
+```{r}
+map%>%st_drop_geometry() %>%
+  pivot_longer(cols = c('pred_TC','pred_TS','pred_BP','prev')) %>%
+  ggplot() + 
+  geom_density_ridges(mapping = aes(x = value, 
+                                    y = name, 
+                                    fill = name), 
+                      color = "white",alpha=0.7)+
+  scale_fill_manual(values = alpha(brewer.pal(n = 4, name = "Dark2"), 0.7))+
+  guides(color = "none",fill="none") +
+  labs(x = "Prévalence VIH", y = NULL, title = "Comparaison des densités des predictions du modèle SAR",fill = "Method")
+```
+5 Estimation du modèle SEM
+5.1 Estimation avec la fonction errorsarlm
+
+```{r}
+PREV_SEM= errorsarlm(prev~ tx_chomage+tx_pauvrete + taux_delinquance_pour_mille + Revenu.annuel.Moyen..en.millier.d.euros.+densite_pop, listw=cont.w,data=map)
+#where lambda is found by optimize() first,  and other parameters by generalized least squares subsequently.
+summary(PREV_SEM)
+```
+5.2 Analyse des résidus
+
+Représentation cartographique des résidus
+
+```{r}
+map$sem_res <- resid(PREV_SEM)
+
+tm_shape(map) +
+  tm_polygons(
+    fill = "sem_res",
+    fill_alpha = 0.7,
+    fill.scale = tm_scale_intervals(
+      values = "rd_yl_bu",
+      n = 6,
+      style = "pretty"
+    ),
+    fill.legend = tm_legend(title = "Résidus SEM")
+  ) +
+  tm_text(text = "DDEP_C_COD", size = 0.6) +
+  tm_title("Distribution spatiale des résidus SEM")
+```
+
+6 Estimation du modèle SDM
+6.1 Estimation avec la fonction lagsarlm
+
+```{r}
+PREV_SDM <- lagsarlm(prev~ tx_chomage+tx_pauvrete + taux_delinquance_pour_mille + Revenu.annuel.Moyen..en.millier.d.euros.+densite_pop, listw=cont.w,data=map, Durbin = TRUE)
+summary(PREV_SDM)
+```
+6.2 Calcul des effets directs et indirects
+
+```{r}
+summary(impacts(PREV_SDM,listw=cont.w, R=1000), zstats=TRUE)
+```
+6.3 Analyse des résidus
+
+Cartographie des résidus
+
+```{r}
+map$sdm_res <- resid(PREV_SDM)
+
+tm_shape(map) +
+  tm_polygons(
+    fill = "sdm_res",
+    fill_alpha = 0.7,
+    fill.scale = tm_scale_intervals(
+      values = "rd_yl_bu",
+      n = 6,
+      style = "pretty"
+    ),
+    fill.legend = tm_legend(title = "Résidus SDM")
+  ) +
+  tm_text(text = "DDEP_C_COD", size = 0.6) +
+  tm_title("Distribution spatiale des résidus SDM")
+```
+
+Représentation de la distribution des résidus
+
+```{r}
+map$ols_res <- resid(PREV_OLS)  # Ajout des résidus OLS pour comparaison
+
+# Graphique des densités
+map%>%st_drop_geometry() %>%
+  pivot_longer(cols = c('slx_res','sar_res','sem_res','sdm_res')) %>%
+  ggplot() +  
+  geom_density(mapping = aes(x = value, 
+                          color = name, fill = name), 
+            size = 0.5) + 
+  geom_density(mapping = aes(x = ols_res), 
+                color = "gray20", size = 0.5) + 
+  scale_fill_manual(values = alpha(brewer.pal(n = 4, name = "Dark2"), 0.8)) + 
+  scale_color_manual(values = alpha(brewer.pal(n = 4, name = "Dark2"), 1)) + 
+  guides(color = "none", fill = "none") + 
+  labs(x = "Résidus", y = "Densité", 
+       title = "Comparaison de la denisté des réesidus SAR, SDM, SEM et SLX", 
+       subtitle = "La distribution des résidus MCO est indiquée par la ligne noire") + 
+  facet_wrap(~ name, nrow = 1)
+```
+
+7 Synthèse des résultats
+
+```{r}
+stargazer(PREV_OLS,PREV_SLX, PREV_SAR,PREV_SEM,PREV_SDM, type = "text",header=FALSE,model.names = FALSE,
+          dep.var.labels.include = FALSE,column.labels =  c("OLS","SLX","SAR","SEM","SDM"),
+          model.numbers          = FALSE,  title="Résultats d'estimation des modèles spatiaux")
+```
+8.1 Stratégie de Lesage et Pace
+
+    On commence par la branche de gauche ie SDM/SAR
+
+    H0:θ=0H0​:θ=0
+
+    Le modèle non contraint est le modèle SDM et le modèle contraint le modèle SAR
+```{r}
+sdm_vs_sar<-LR.Sarlm(PREV_SDM,PREV_SAR)
+print(sdm_vs_sar) 
+```
+On accepte l’hypothèse nulle p-value est < 5% et donc on part sur le modèle SDM et on teste le modèle SDM/SLX.
+
+Sur la branche du centre on teste SDM/SLX
+
+  H0:ρ=0,θ≠0,θ+ρ∗β≠0H0​:ρ=0,θ=0,θ+ρ∗β=0
+
+Le modèle non contraint est le modèle SDM et le modèle contraint le modèle SLX
+
+```{r}
+sdm_vs_slx<-LR.Sarlm(PREV_SDM,PREV_SLX)
+print(sdm_vs_slx) 
+```
+la p-value <5%, on rejette donc l’hypothèse H0 et choisit un modèle SDM
+
+
+Sur la branche de gauche, on teste SDM/SEM
+
+  H0:θ+ρ∗β≠0H0​:θ+ρ∗β=0
+
+Le modèle non contraint est le modèle SDM et le modèle contraint le modèle SEM
+
+```{r}
+sdm_vs_sem<-LR.Sarlm(PREV_SDM,PREV_SEM)
+print(sdm_vs_sem)
+```
+la p-value <5%, on rejette donc l’hypothèse H0 et on retient modèle SDM
+
+
+```{r}
+AICs<-c(AIC(PREV_OLS),AIC(PREV_SLX),AIC(PREV_SAR), AIC(PREV_SEM), AIC(PREV_SDM))
+plot(AICs, type="h", lwd=1.5, xaxt="n", xlab="")
+axis(1, at=1:5,labels=F) #5= number of models
+labels<-c("OLS", "SLX","SAR", "SEM","SDM")
+text(1:5, par("usr")[3]-.25, srt=45, adj=1, labels=labels, xpd=T)
+mtext(side=1, text="Model Specification", line=3)
+symbols(x= which.min(AICs), y=AICs[which.min(AICs)],inches = FALSE, circles=0.2, fg=2,lwd=2,add=T)
+```
+```{r}
+BICs<-c(BIC(PREV_OLS),BIC(PREV_SLX),BIC(PREV_SAR), BIC(PREV_SEM), BIC(PREV_SDM))
+plot(BICs, type="h", lwd=1.5, xaxt="n", xlab="")
+axis(1, at=1:5,labels=F) #5= number of models
+labels<-c("OLS", "SLX","SAR", "SEM","SDM")
+text(1:5, par("usr")[3]-.25, srt=45, adj=1, labels=labels, xpd=T)
+mtext(side=1, text="Model Specification", line=3)
+symbols(x= which.min(BICs), y=BICs[which.min(BICs)],inches = FALSE, circles=0.2, fg=2,lwd=2,add=T)
+```
+
+
+```{r}
+LLs<-c(logLik(PREV_OLS),logLik(PREV_SLX),logLik(PREV_SAR), logLik(PREV_SEM), logLik(PREV_SDM))
+plot(LLs, type="h", lwd=1.5, xaxt="n", xlab="")
+axis(1, at=1:5,labels=F) #5= number of models
+labels<-c("OLS", "SLX","SAR", "SEM","SDM")
+text(1:5, par("usr")[3]-.25, srt=45, adj=1, labels=labels, xpd=T)
+mtext(side=1, text="Model Specification", line=3)
+symbols(x= which.max(LLs), y=LLs[which.max(LLs)],inches = FALSE, circles=0.2, fg=2,lwd=2,add=T)
+```
+
+6.4 Prédictions avec le modèle SDM
+
+Prédiction selon les 3 prédicteurs, Trend Corrected, Trend Signal Noise et BLUP
+
+```{r}
+map$pred_sdm_TC <- as.numeric(predict(PREV_SDM,  listw=cont.w, pred.type = "TC"))
+#The Trend Signal Noise Predictor
+map$pred_sdm_TS <- as.numeric(predict(PREV_SDM,  listw=cont.w, pred.type = "TS"))
+map$pred_sdm_BP <- as.numeric(predict(PREV_SDM,  listw=cont.w, pred.type = "BP"))
+summary(map[,c('pred_sdm_TC','pred_sdm_TS','pred_sdm_BP')]%>%st_drop_geometry())
+```
+Comparaison des prédictions
+
+```{r}
+map %>%
+  ggplot() +
+  geom_boxplot(aes(x = "Trend Corrected", y = pred_sdm_TC)) +
+  geom_boxplot(aes(x = "Trend Signal Noise", y = pred_sdm_TS)) +
+  geom_boxplot(aes(x = "BLUP", y = pred_sdm_BP)) +
+  geom_boxplot(aes(x = "Valeur Observée", y = prev))+
+  xlab("Type de Prédiction") +
+  ylab("") +
+  ggtitle("Distribution des différentes prédictions SDM")
+```
+Comparaison des densités des prédictions du modèle SDM
+
+```{r}
+map%>%st_drop_geometry() %>%
+   pivot_longer(cols = c('pred_sdm_TC','pred_sdm_TS','pred_sdm_BP')) %>%
+  ggplot() + 
+  geom_density(mapping = aes(x = value, 
+                          color = name, fill = name), 
+            size = 0.5) + 
+  geom_density(mapping = aes(x = prev), 
+                color = "gray20", size = 0.5) + 
+  scale_fill_manual(values = alpha(brewer.pal(n = 3, name = "Dark2"), 0.8)) + 
+  scale_color_manual(values = alpha(brewer.pal(n = 3, name = "Dark2"), 1)) + 
+  guides(color = "none", fill = "none") + 
+  labs(x = "Prédictions", y = "Densité", 
+       title = "Comparaison des densités des prédictions du modèle SDM", 
+       subtitle = "La distribution des valeurs observée est représentée par la ligne noire") + 
+  facet_wrap(~ name, nrow = 1)
+```
+

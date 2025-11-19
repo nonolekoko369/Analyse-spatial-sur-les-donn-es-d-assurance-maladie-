@@ -1,0 +1,529 @@
+---
+title: "Analyse des données spatiales liés aux VIH en France"
+authors: Astri Ugo, Thomas Nominoë
+date: "2025-11-17"
+output: html_document
+---
+
+# Introduction
+
+Depuis l’apparition des premiers cas de VIH/sida au début des années 1980, la France a mis en place des politiques de santé publique parmi les plus structurées d’Europe, notamment avec la création de dispositifs de dépistage, de surveillance épidémiologique et d’accès universel aux traitements antirétroviraux. Si la mortalité liée au sida a fortement diminué depuis les années 1990, la circulation du virus reste hétérogène selon les territoires de France continentale, en particulier dans certaines grandes agglomérations.
+
+L’objectif de ce document est d’explorer la répartition spatiale des indicateurs liés au VIH en France à partir de données publiques. À travers l’analyse cartographique et statistique, nous cherchons à mettre en évidence les disparités géographiques, les zones à forte prévalence, ainsi que les dynamiques régionales pouvant éclairer les stratégies de prévention et de prise en charge.\
+
+L’étude mobilise des outils de visualisation, de manipulation de données et de cartographie sous R, notamment via les packages *tidyverse*, *sf* et *leaflet*.\
+
+Ce travail s’inscrit dans une démarche de compréhension des enjeux territoriaux du VIH, en offrant une lecture intuitive et reproductible des données spatiales.
+
+# Jeu de données
+
+| Variable | Description |
+|---------------------------|---------------------------------------------|
+| **dept** | Code du département (format numérique, sans zéro initial). |
+| **Ntop** | Nombre de personnes vivant avec le VIH (20–29 ans) dans le département. |
+| **Npop** | Population totale des 20–29 ans dans le département. |
+| **prev** | Prévalence du VIH chez les 20–29 ans (Ntop / Npop). |
+| **nb_actes_delinquance** | Nombre total d’actes de délinquance enregistrés dans le département. |
+| **taux_delinquance_pour_mille** | Taux de délinquance pour 1 000 habitants. |
+| **tx_chomage** | Taux de chômage (en %). |
+| **densite_pop** | Densité de population (habitants par km²). |
+| **tx_pauvrete** | Taux de pauvreté (part de la population ayant un niveau de vie inférieur à 60% du salaire médian en France) (en %). |
+| **revenu** | Revenu annuel moyen par habitant (en milliers d'euros). |
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Etude
+
+## Préparation des données
+
+Chargement des packages :
+
+```{r, results = "hide"}
+library(readr)
+library(knitr)
+library(tidyverse)
+library(corrplot)
+library(sf)
+library(maps)
+library(spdep)
+library(tmap)
+library(lmtest)
+library(spatialreg)
+library(skimr)
+library(Hmisc)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+
+```
+
+Chargement/Préparation des données :
+
+```{r}
+vih <- read_csv("repartition_VIH_20_29_par_dept.csv")
+
+#L'étude se basera sur la France continentale, nous retirons donc la corse
+
+vih <- vih |>
+  filter(dept != c("2A", "2B"))
+
+# Remplacer le NA par la moyenne (en excluant le NA)
+vih$tx_chomage[is.na(vih$tx_chomage)] <- mean(vih$tx_chomage, na.rm = TRUE)
+
+# Vérifier
+sum(is.na(vih$tx_chomage))  # doit être 0 maintenant
+
+```
+
+```{r}
+kable(vih[1:10,], caption ="Personnes atteintent de VIH en france, 20-29 ans")
+
+```
+
+## Analyse exploratoire
+
+### Résumé statistique
+
+```{r}
+skim(vih)
+
+```
+
+### Matrice de corrélation
+
+```{r}
+vih_num <- dplyr::select_if(vih, is.numeric)
+cor_matrix <- cor(vih_num, use = "pairwise.complete.obs")
+res <- rcorr(as.matrix(vih_num))
+p_matrix <- res$P
+
+
+corrplot(cor_matrix,
+         method = "color",
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         addCoef.col = "black",
+         number.cex = 0.5,
+         tl.cex = 0.8,            
+         tl.col = "black",
+         diag = FALSE,
+         type = "upper",          
+         sig.level = 0.05)
+
+
+```
+
+Relation entre le nombre de personnes atteintes du vih et le nombre d'acte de délinquance
+
+```{r}
+# Variables explicatives (on remplace densite_pop par ln_densite_pop)
+vars <- c("taux_delinquance_pour_mille", 
+          "tx_chomage", "ln_densite_pop", "tx_pauvrete", "revenu")
+
+# Création de ln_densite_pop
+vih2 <- vih %>%
+  mutate(ln_densite_pop = log(densite_pop))
+
+# Passage en format long
+vih_long <- vih2 %>%
+  select(prev, all_of(vars)) %>%
+  pivot_longer(cols = all_of(vars), names_to = "variable", values_to = "valeur")
+
+# Plot
+ggplot(vih_long, aes(x = valeur, y = prev)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  facet_wrap(~variable, scales = "free_x") +
+  labs(x = "Valeur de la variable", y = "Prévalence VIH",
+       title = "Régressions linéaires entre prévalence du VIH et variables socio-économiques") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6))
+```
+
+On retrouve une possible corrélation positive dans le log de la densité, le revenu et le taux de délinquance pour mille habitant.
+
+## Représentation cartographique des données
+
+### Heatmap
+
+```{r}
+url <- "https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/departements.geojson"
+carte_dep <- st_read(url)
+
+vih2 <- vih %>%
+  mutate(dept = sprintf("%02d", dept))
+
+carte_vih <- carte_dep %>%
+  left_join(vih2, by = c("code" = "dept"))
+
+carte_vih <- carte_vih %>% 
+  filter(!code %in% c("2A","2B"))  # retire la Corse
+
+
+ggplot(carte_vih) +
+  geom_sf(aes(fill = prev), color = "white", size = 0.2) +
+  scale_fill_gradient(low = "lightyellow", high = "red", name = "Prévalence du VIH") +
+  labs(
+    title = "Prévalence du VIH (pour 1000 habitants) par département",
+    subtitle = "Carte choroplèthe basée sur les codes INSEE"
+  ) +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+```
+
+Une prévalence marquée en région parisienne et dans les département qui ne sont pas quasi-exclusivement ruraux.
+
+### Création de la matrice de poids spatiale via contiguité
+
+```{r}
+centroids <- st_centroid(carte_vih)  # crée un sf POINT au centre de chaque polygone
+
+
+tmap_mode("plot")
+
+tm_shape(carte_vih) +
+  tm_polygons(
+    fill = "prev",             # variable à colorer
+    col = "grey25",                  # contour des départements
+    fill.scale = tm_scale(values = "Reds"),   # palette
+    fill.legend = tm_legend(title = "Prévalence VIH\n(pour 1000 hab.)")
+  ) +
+  tm_shape(centroids) +
+  tm_dots(
+    size = 0.2,
+    col = "red",
+    fill_alpha = 0.6
+  ) +
+  tm_title("Centroids et Prévalence VIH") +
+  tm_layout(frame = FALSE, bg.color = "white")
+
+```
+
+```{r}
+# carte_vih : ton sf avec les départements et la prévalence
+# queen = TRUE pour contiguïté “Queen” (partage frontière ou coin)
+col.nb <- poly2nb(carte_vih, queen = TRUE)
+
+# Vérifier les premiers voisins
+head(col.nb)
+
+```
+
+```{r}
+col.listw <- nb2listw(col.nb, style = "W")  # style W = row-standardized
+summary(col.listw)
+```
+
+```{r}
+# Centroides pour visualisation
+centroids <- st_centroid(carte_vih)
+coords_matrix <- st_coordinates(centroids)
+
+plot(st_geometry(carte_vih), col = "lightgrey", border = "white")
+plot(col.nb, coords_matrix, add = TRUE, col = "red")
+
+```
+
+## Analyse de l'autocorrélation spatiale
+
+```{r}
+xx <- cbind(carte_vih$prev, carte_vih$`Revenu annuel Moyen (en millier d’euros)`, carte_vih$densite_pop)
+```
+
+```{r}
+wxx <- lag.listw(col.listw,xx) 
+head(wxx)
+```
+
+```{r}
+attributes(col.listw)
+```
+
+```{r}
+par(mfrow=c(1,2),cex.main=0.7)
+boxplot.matrix(xx,main="VIH")
+boxplot.matrix(wxx,main="Spatial lag VIH")
+```
+
+```{r}
+# Ajouter le spatial lag de la prévalence
+carte_vih$W_prevalence <- lag.listw(col.listw, carte_vih$prev)
+
+# Transformer en format long et tracer les densités
+carte_vih %>%
+  st_drop_geometry() %>%
+  pivot_longer(cols = c('prev','W_prevalence')) %>%
+  ggplot() +
+    geom_density(aes(x = value, color = name, fill = name), alpha = 0.3) +
+    scale_color_manual(values = brewer.pal(n = 2, name = "Dark2")) +
+    scale_fill_manual(values = brewer.pal(n = 2, name = "Dark2")) +
+    labs(
+      x = "Prévalence VIH",
+      y = "Densité",
+      title = "Comparaison Prévalence et Spatial Lag",
+      color = "Variable",
+      fill = "Variable"
+    )
+
+```
+
+```{r}
+
+# Transformation logarithme pour densite_pop
+carte_vih <- carte_vih %>%
+  mutate(ln_densite_pop = log(densite_pop))
+
+# Variables à analyser (avec densité logarithmée)
+vars <- c("prev", "tx_chomage", "ln_densite_pop", "tx_pauvrete", "revenu")
+
+# Création de la matrice de poids (voisins)
+nb <- poly2nb(carte_vih)           
+lw <- nb2listw(nb, style = "W")    
+
+# Créer un data.frame long avec spatial lag pour chaque variable
+long_list <- lapply(vars, function(v) {
+  data.frame(
+    variable = v,
+    value = carte_vih[[v]],
+    W_value = lag.listw(lw, carte_vih[[v]])
+  )
+})
+
+carte_long <- bind_rows(long_list)
+
+# Plot Moran pour toutes les variables en facettes
+ggplot(carte_long, aes(x = value, y = W_value)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  facet_wrap(~variable, scales = "free") +
+  labs(title = "Moran plots pour plusieurs variables",
+       x = "Valeur de la variable",
+       y = "Spatial lag") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(color = "black", size = 10, face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 8)
+  )
+
+
+```
+
+Les variables (à part peut-être prev) semblent être auto-corrélées positivement.
+
+### Indice d'autocorrélation spatiale
+
+```{r}
+morantesVIH <-moran.test(carte_vih$prev,col.listw,randomisation=FALSE,alternative="greater")
+morantesVIH
+```
+
+La p-value est inférieure à 1% donc on rejette l'hypothèse nulle d'absence d'autocorrélation spatiale. La statistique I de Moran est positive et relativement élevé donc la prévalence du VIH présente une autocorrélation spatiale significative et positive.
+
+```{r}
+moran.plot(x=carte_vih$prev,col.listw,xlab="CRIME",ylab="Spatial Lag de la variable prev",labels=as.character(columbus$POLYID),main=paste("Moran Plot I = ",round(morantesVIH$estimate[1],3)))
+
+```
+
+test de moran sur toutes nos variables d'intéret
+
+```{r}
+# Colonnes numériques pertinentes
+xx <- carte_vih %>% 
+  st_drop_geometry() %>%        
+  select(prev, Ntop, Npop, revenu, tx_pauvrete, tx_chomage, nb_actes_delinquance)
+
+# Calcul du test de Moran pour chaque variable
+moran_results <- lapply(names(xx), function(v) {
+  x_clean <- xx[[v]]
+  
+  # Retirer les NA si nécessaire
+  if(any(is.na(x_clean))) x_clean <- na.omit(x_clean)
+  
+  test <- moran.test(x_clean, listw = col.listw)  # col.listw doit correspondre à l'ordre/longueur
+  data.frame(
+    Variable = v,
+    Moran_I = test$estimate["Moran I statistic"],
+    Expectation = test$estimate["Expectation"],
+    Variance = test$estimate["Variance"],
+    p_value = test$p.value
+  )
+})
+
+# Résultat combiné et trié
+moran_summary <- bind_rows(moran_results) %>% arrange(desc(Moran_I))
+
+moran_summary
+
+
+
+```
+
+### LISA
+
+```{r}
+# Local Moran (LISA)
+lisa <- localmoran(carte_vih$prev, col.listw)
+
+# Ajouter les résultats à ton sf
+carte_vih$Ii <- lisa[,1]      # valeur de Moran local
+carte_vih$Z_Ii <- lisa[,4]    # z-score
+carte_vih$p_value <- lisa[,5] # p-value
+
+carte_vih$cluster <- NA
+carte_vih$cluster[carte_vih$Ii > 0 & carte_vih$p_value < 0.05] <- "High-High"
+carte_vih$cluster[carte_vih$Ii < 0 & carte_vih$p_value < 0.05] <- "Low-Low"
+carte_vih$cluster[carte_vih$Ii > 0 & carte_vih$p_value >= 0.05] <- "Insignificant"
+carte_vih$cluster[carte_vih$Ii < 0 & carte_vih$p_value >= 0.05] <- "Insignificant"
+
+tmap_mode("plot")
+
+tm_shape(carte_vih) +
+  tm_polygons(
+    col = "cluster",
+    palette = c("red", "yellow", "blue","grey80"),
+    title = "LISA clusters"
+  ) +
+  tm_layout(frame = FALSE)
+
+```
+
+Les régions d'Ile-de-France apparaissent comme des hot spots (zones de prévalences élevées entourés d'autres prévalences élevées). Le lot, le Cantal, la Lozère et les vosges sont, selon le graphique, aussi des hot spots mais leurs prévalences ne sont vraiment pas très élevées pourtant. La Côte-d'Or et le Doubs sont quant à eux des cold spots (zones de prévalences faibles entourés d'autres prévalences faibles).
+
+### Estimation du modèle adéquat avec LM-Test
+
+OLS Classique
+
+```{r}
+# Formule OLS
+ols_formula <- prev ~ revenu + tx_pauvrete + tx_chomage + nb_actes_delinquance
+
+# Estimation du modèle OLS
+ols_model <- lm(ols_formula, data = carte_vih)
+
+# Résumé classique
+summary(ols_model)
+
+# Test d'homoscédasticité (Breusch-Pagan)
+bptest(ols_model)
+
+# Test de Moran sur les résidus
+Moran_Res <- lm.morantest(ols_model, col.listw, alternative = "two.sided")
+Moran_Res
+```
+
+Le modèle OLS explique une part importante de la variance de la prévalence du VIH (R² ajusté = 0,629). Seuls revenu et nb_acte_delinquance sont significativement associés à la prévalence, tandis que le taux de pauvreté et le taux de chômage ne le sont pas. Le test de Breusch-Pagan (p = 0,023) suggère désormais une légère hétéroscédasticité des résidus. De plus, l’autocorrélation spatiale des résidus reste significative (Moran I = 0,220 ; p \< 0,001), indiquant que des effets spatiaux ne sont toujours pas capturés par l’OLS.
+
+On va devoir determiner sur l'AC vient des var dep ou des erreurs
+
+```{r}
+lm.LMtests(ols_model,listw = col.listw,test="LMerr") #p-val très proche de 0.05 donc on va tout de meme test un SEM 
+
+lm.LMtests(ols_model,listw = col.listw,test="LMlag")
+```
+
+Les tests de Rao montrent que l’autocorrélation spatiale est significative à la fois dans les résidus (RSerr, p = 0,001) et dans la variable dépendante (RSlag, p \< 0,001). Cela indique que le modèle OLS ne capture pas correctement la structure spatiale des données. Il serait donc préférable d’utiliser un modèle spatial (SAR ou SEM) pour tenir compte à la fois des effets de dépendance de la variable dépendante et des autocorrélations dans les erreurs.
+
+### Modèle SEM
+
+```{r}
+
+# Estimation du SEM sur la variable 'prev'
+SEM_prev <- errorsarlm(
+  prev ~ 
+         revenu + 
+         tx_pauvrete + tx_chomage + nb_actes_delinquance,
+  listw = col.listw,   # matrice de poids spatiaux
+  data = carte_vih
+)
+
+# Résumé des résultats
+summary(SEM_prev)
+```
+
+Le modèle Spatial Error (SEM) montre que la prévalence du VIH est significativement associée au revenu et au nombre d’actes de délinquance, tandis que le taux de pauvreté et le taux de chômage n’ont pas d’effet significatif. Le paramètre lambda (λ = 0,455, p \< 0,001) indique une autocorrélation spatiale importante dans les résidus, ce qui confirme que le modèle OLS ne capturait pas correctement la dépendance spatiale. L’ajustement du SEM améliore la qualité du modèle, avec un AIC plus faible et une variance résiduelle réduite, permettant des estimations plus fiables des effets des variables explicatives.
+
+```{r}
+#on veut plot les erreurs
+
+carte_vih$sem_res <- residuals(SEM_prev)
+
+tmap_mode("plot")
+
+tm_shape(carte_vih) +
+  tm_text("Ntop", size = 0.7) +
+  tm_polygons(
+    fill = "sem_res",
+    fill_alpha = 0.5,
+    palette = "-brewer.rd_yl_bu",           # palette inversée
+    fill.scale = tm_scale_intervals(n = 7, midpoint = 0),  # centre sur 0 pour résidus
+    fill.legend = tm_legend(title = "Résidus SEM"),
+    id = "Ntop"
+  )
+
+```
+
+Les résidus ont l'air bien répartis et proche de 0 donc le SEM corrige efficacement l'autocorrélation.
+
+SLX
+
+```{r}
+# Variables explicatives sans tx_chomage
+vars <- c("Ntop", "Npop", "`Revenu annuel Moyen (en millier d’euros)`",
+          "tx_pauvrete", "nb_actes_delinquance")
+
+# Créer les W*X
+for (v in vars) {
+  # Nom pour la variable lag
+  wvar <- paste0("W_", gsub("`", "", v))  # enlever backticks pour nom interne
+  carte_vih[[wvar]] <- lag.listw(col.listw, carte_vih[[gsub("`", "", v)]])
+}
+
+# Préparer la formule avec backticks pour variables avec espaces
+lag_vars <- paste0("W_", c("Ntop", "Npop", "Revenu annuel Moyen (en millier d’euros)",
+                           "tx_pauvrete", "nb_actes_delinquance"))
+lag_vars <- paste0("`", lag_vars, "`")  # backticks pour les lags
+
+slx_formula <- as.formula(
+  paste("prev ~", paste(c(vars, lag_vars), collapse = " + "))
+)
+
+# Estimer le modèle
+SLX_model_manual <- lm(slx_formula, data = carte_vih)
+summary(SLX_model_manual)
+
+
+```
+
+```{r}
+# Comparer les AIC
+AICs <- c(
+  OLS = AIC(ols_model),
+  SLX = AIC(SLX_model_manual),
+  SEM = AIC(SEM_prev)
+)
+
+print(AICs)
+
+# Visualisation rapide
+plot(AICs, type = "h", lwd = 1.5, xaxt = "n", xlab = "Modèles", ylab = "AIC")
+axis(1, at = 1:3, labels = names(AICs))
+text(1:3, par("usr")[3] - 0.5, labels = names(AICs), srt = 45, adj = 1, xpd = TRUE)
+
+# Mettre un cercle sur le meilleur modèle
+symbols(
+  x = which.min(AICs),
+  y = AICs[which.min(AICs)],
+  circles = 0.2,
+  fg = 2,
+  lwd = 2,
+  inches = FALSE,
+  add = TRUE
+)
+
+```
+
+SEM meilleur !
