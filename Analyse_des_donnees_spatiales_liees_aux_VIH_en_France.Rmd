@@ -5,7 +5,7 @@ date: "2025-11-17"
 output: html_document
 ---
 
-# Introduction
+# I. Introduction générale
 
 Depuis l’apparition des premiers cas de VIH/sida au début des années 1980, la France a mis en place des politiques de santé publique parmi les plus structurées d’Europe, notamment avec la création de dispositifs de dépistage, de surveillance épidémiologique et d’accès universel aux traitements antirétroviraux. Si la mortalité liée au sida a fortement diminué depuis les années 1990, la circulation du virus reste hétérogène selon les territoires de France continentale, en particulier dans certaines grandes agglomérations.
 
@@ -15,7 +15,9 @@ L’étude mobilise des outils de visualisation, de manipulation de données et 
 
 Ce travail s’inscrit dans une démarche de compréhension des enjeux territoriaux du VIH, en offrant une lecture intuitive et reproductible des données spatiales.
 
-# Jeu de données
+# II. Cadre méthodologique
+
+# III. Analyse du jeu de données
 
 | Variable | Description |
 |---------------------------|---------------------------------------------|
@@ -33,8 +35,6 @@ Ce travail s’inscrit dans une démarche de compréhension des enjeux territori
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-
-# Etude
 
 ## Préparation des données
 
@@ -176,7 +176,9 @@ ggplot(carte_vih) +
 
 Une prévalence marquée en région parisienne et dans les département qui ne sont pas quasi-exclusivement ruraux.
 
-### Création de la matrice de poids spatiale via contiguité
+# IV. Analyse et discussion des résultats
+
+## Création de la matrice de poids spatiale via contiguité
 
 ```{r}
 centroids <- st_centroid(carte_vih)  # crée un sf POINT au centre de chaque polygone
@@ -393,9 +395,9 @@ tm_shape(carte_vih) +
 
 Les régions d'Ile-de-France apparaissent comme des hot spots (zones de prévalences élevées entourés d'autres prévalences élevées). Le lot, le Cantal, la Lozère et les vosges sont, selon le graphique, aussi des hot spots mais leurs prévalences ne sont vraiment pas très élevées pourtant. La Côte-d'Or et le Doubs sont quant à eux des cold spots (zones de prévalences faibles entourés d'autres prévalences faibles).
 
-### Estimation du modèle adéquat avec LM-Test
+### Estimation du modèle adéquat
 
-OLS Classique
+### OLS Classique
 
 ```{r}
 # Formule OLS
@@ -417,17 +419,35 @@ Moran_Res
 
 Le modèle OLS explique une part importante de la variance de la prévalence du VIH (R² ajusté = 0,629). Seuls revenu et nb_acte_delinquance sont significativement associés à la prévalence, tandis que le taux de pauvreté et le taux de chômage ne le sont pas. Le test de Breusch-Pagan (p = 0,023) suggère désormais une légère hétéroscédasticité des résidus. De plus, l’autocorrélation spatiale des résidus reste significative (Moran I = 0,220 ; p \< 0,001), indiquant que des effets spatiaux ne sont toujours pas capturés par l’OLS.
 
-On va devoir determiner sur l'AC vient des var dep ou des erreurs
+#### Modèles SAR et SEM
 
 ```{r}
-lm.LMtests(ols_model,listw = col.listw,test="LMerr") #p-val très proche de 0.05 donc on va tout de meme test un SEM 
+lm.LMtests(ols_model,listw = col.listw,test="LMerr")
 
 lm.LMtests(ols_model,listw = col.listw,test="LMlag")
 ```
 
 Les tests de Rao montrent que l’autocorrélation spatiale est significative à la fois dans les résidus (RSerr, p = 0,001) et dans la variable dépendante (RSlag, p \< 0,001). Cela indique que le modèle OLS ne capture pas correctement la structure spatiale des données. Il serait donc préférable d’utiliser un modèle spatial (SAR ou SEM) pour tenir compte à la fois des effets de dépendance de la variable dépendante et des autocorrélations dans les erreurs.
 
-### Modèle SEM
+#### Modèle SLX
+
+```{r}
+# Modèle SLX : inclusion des covariables spatialisées
+SLX_prev <- lmSLX(
+  prev ~ revenu + tx_pauvrete + tx_chomage + nb_actes_delinquance,
+  listw = col.listw,
+  data = carte_vih
+)
+
+# Résumé des résultats
+summary(SLX_prev)
+```
+
+Le modèle SLX montre que, comme dans les modèles SEM et SAR, la prévalence du VIH est significativement associée au nombre d’actes de délinquance (β = 8,26e-08, p \< 0,0001) et, plus faiblement, au chômage. Le revenu et le taux de pauvreté ne sont pas significatifs. Les effets spatiaux des covariables (lag.revenu, lag.tx_pauvrete, lag.tx_chomage, lag.nb_actes_delinquance) ne sont pas significatifs, indiquant que la prévalence d’une commune n’est pas fortement influencée par les valeurs des covariables dans les communes voisines. Le SLX capture donc surtout les effets directs des variables locales, sans mettre en évidence d’effets spatiaux indirects significatifs.
+
+### Evaluation des modèles retenus
+
+#### Modèle SEM
 
 ```{r}
 
@@ -454,7 +474,6 @@ carte_vih$sem_res <- residuals(SEM_prev)
 tmap_mode("plot")
 
 tm_shape(carte_vih) +
-  tm_text("Ntop", size = 0.7) +
   tm_polygons(
     fill = "sem_res",
     fill_alpha = 0.5,
@@ -468,50 +487,85 @@ tm_shape(carte_vih) +
 
 Les résidus ont l'air bien répartis et proche de 0 donc le SEM corrige efficacement l'autocorrélation.
 
-SLX
+#### Modèle SAR
 
 ```{r}
-# Variables explicatives sans tx_chomage
-vars <- c("Ntop", "Npop", "`Revenu annuel Moyen (en millier d’euros)`",
-          "tx_pauvrete", "nb_actes_delinquance")
-
-# Créer les W*X
-for (v in vars) {
-  # Nom pour la variable lag
-  wvar <- paste0("W_", gsub("`", "", v))  # enlever backticks pour nom interne
-  carte_vih[[wvar]] <- lag.listw(col.listw, carte_vih[[gsub("`", "", v)]])
-}
-
-# Préparer la formule avec backticks pour variables avec espaces
-lag_vars <- paste0("W_", c("Ntop", "Npop", "Revenu annuel Moyen (en millier d’euros)",
-                           "tx_pauvrete", "nb_actes_delinquance"))
-lag_vars <- paste0("`", lag_vars, "`")  # backticks pour les lags
-
-slx_formula <- as.formula(
-  paste("prev ~", paste(c(vars, lag_vars), collapse = " + "))
+# Estimation du SAR sur la variable 'prev'
+SAR_prev <- lagsarlm(
+  prev ~ 
+    revenu + 
+    tx_pauvrete + 
+    tx_chomage + 
+    nb_actes_delinquance,
+  listw = col.listw,   # matrice de poids spatiaux
+  data = carte_vih
 )
 
-# Estimer le modèle
-SLX_model_manual <- lm(slx_formula, data = carte_vih)
-summary(SLX_model_manual)
+# Résumé des résultats
+summary(SAR_prev)
+```
 
+Le modèle Spatial Lag (SAR) confirme, comme le SEM, que la prévalence du VIH est significativement associée au revenu et au nombre d’actes de délinquance, tandis que la pauvreté et le chômage restent non significatifs. Le paramètre spatial rho (ρ = 0,36, p \< 0,001) met en évidence une dépendance spatiale substantielle dans la variable dépendante elle-même, là où le SEM captait une autocorrélation dans les résidus. L’ajustement est amélioré par rapport au modèle OLS (AIC = –345 contre –335), et l’absence d’autocorrélation résiduelle (p = 0,85) montre que le SAR capture pleinement la structure spatiale du phénomène.
+
+```{r}
+# Ajouter les résidus du SAR à la carte
+carte_vih$sar_res <- residuals(SAR_prev)
+
+tmap_mode("plot")
+
+tm_shape(carte_vih) +
+  tm_polygons(
+    fill = "sar_res",
+    fill_alpha = 0.5,
+    palette = "-brewer.rd_yl_bu",                  # palette inversée
+    fill.scale = tm_scale_intervals(n = 7, midpoint = 0),  # centre sur 0 pour résidus
+    fill.legend = tm_legend(title = "Résidus SAR"),
+    id = "Ntop"
+  )
 
 ```
+
+Même constat : les résidus sont bien répartis et proches de 0 donc le modèle SAR corrige bien l'autocorrélation.
+
+#### Modèle SAC (SEM + SAR)
+
+```{r}
+# Estimation du SAC sur la variable 'prev'
+SAC_prev <- sacsarlm(
+  prev ~ 
+    revenu + 
+    tx_pauvrete + 
+    tx_chomage + 
+    nb_actes_delinquance,
+  listw = col.listw,   # matrice de poids spatiaux
+  data = carte_vih,
+  type = "sac"         # modèle combiné SAR + SEM
+)
+
+# Résumé des résultats
+summary(SAC_prev)
+
+```
+
+Le modèle SAC montre une dépendance spatiale modérée de la prévalence (ρ ≈ 0,316, p ≈ 0,056), tandis que l’autocorrélation des erreurs est faible et non significative (λ ≈ 0,08, p ≈ 0,74). Parmi les variables explicatives, le revenu et le nombre d’actes de délinquance ont un effet positif et significatif sur la prévalence, alors que le taux de pauvreté et le taux de chômage ne sont pas significatifs. Le modèle améliore significativement l’ajustement par rapport à un modèle linéaire classique (LR test p = 0,00245) et présente de faibles résidus, indiquant un bon ajustement global.
+
+#### Synthèse
 
 ```{r}
 # Comparer les AIC
 AICs <- c(
   OLS = AIC(ols_model),
-  SLX = AIC(SLX_model_manual),
-  SEM = AIC(SEM_prev)
+  SEM = AIC(SEM_prev),
+  SAR = AIC(SAR_prev),
+  SAC = AIC(SAC_prev)
 )
 
 print(AICs)
 
 # Visualisation rapide
 plot(AICs, type = "h", lwd = 1.5, xaxt = "n", xlab = "Modèles", ylab = "AIC")
-axis(1, at = 1:3, labels = names(AICs))
-text(1:3, par("usr")[3] - 0.5, labels = names(AICs), srt = 45, adj = 1, xpd = TRUE)
+axis(1, at = 1:4, labels = names(AICs))
+text(1:4, par("usr")[3] - 0.5, labels = names(AICs), srt = 45, adj = 1, xpd = TRUE)
 
 # Mettre un cercle sur le meilleur modèle
 symbols(
@@ -524,6 +578,13 @@ symbols(
   add = TRUE
 )
 
+
 ```
 
-SEM meilleur !
+Parmi les modèles comparés, le SAR présente le plus petit AIC (-345,40), indiquant qu’il offre le meilleur compromis entre ajustement et complexité pour ces données. Le SEM et le SAC ont des AIC légèrement plus élevés (-343,84 et -343,46), tandis que l’OLS a le plus grand AIC (-335,44), montrant qu’il s’ajuste moins bien en ignorant la structure spatiale. Ainsi, l’inclusion de l’effet spatial (SAR) améliore clairement le modèle, tandis que l’ajout d’une autocorrélation des erreurs (SAC) n’apporte pas de gain significatif.
+
+# V. Conclusion générale et perspective
+
+# Références bibliographiques
+
+# Annexes
